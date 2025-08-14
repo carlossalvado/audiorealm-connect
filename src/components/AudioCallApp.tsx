@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card } from '@/components/ui/card';
-import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
 import { Mic, MicOff, Volume2, VolumeX, Phone, PhoneOff, Settings } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
@@ -103,29 +103,35 @@ const AudioCallApp: React.FC = () => {
         console.log('WebSocket connected');
         setCallState(prev => ({ ...prev, status: 'connected' }));
         
-        // Initialize session
-        const setupMessage = {
-          setup: {
-            model: 'models/gemini-2.0-flash-exp',
-            generationConfig: {
-              responseModalities: ['AUDIO'],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: {
-                    voiceName: 'Puck'
+        // Wait a moment before sending setup message
+        setTimeout(() => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            // Initialize session
+            const setupMessage = {
+              setup: {
+                model: 'models/gemini-2.0-flash-exp',
+                generationConfig: {
+                  responseModalities: ['AUDIO'],
+                  speechConfig: {
+                    voiceConfig: {
+                      prebuiltVoiceConfig: {
+                        voiceName: 'Puck'
+                      }
+                    }
                   }
+                },
+                systemInstruction: {
+                  parts: [{
+                    text: "Você é um assistente de IA útil tendo uma conversa por voz. Responda naturalmente e de forma conversacional. Mantenha as respostas concisas, mas envolventes. Você pode ouvir o usuário falando em tempo real."
+                  }]
                 }
               }
-            },
-            systemInstruction: {
-              parts: [{
-                text: "Você é um assistente de IA útil tendo uma conversa por voz. Responda naturalmente e de forma conversacional. Mantenha as respostas concisas, mas envolventes. Você pode ouvir o usuário falando em tempo real."
-              }]
-            }
+            };
+            
+            console.log('Sending setup message');
+            wsRef.current.send(JSON.stringify(setupMessage));
           }
-        };
-        
-        wsRef.current?.send(JSON.stringify(setupMessage));
+        }, 100);
         
         toast({
           title: "Conectado",
@@ -138,27 +144,38 @@ const AudioCallApp: React.FC = () => {
         
         // Check if the message is binary (Blob) or text
         if (event.data instanceof Blob) {
-          console.log('Received binary audio data');
-          // Handle binary audio data
+          console.log('Received binary audio data, size:', event.data.size);
+          // Handle binary audio data - convert to playable format
           const reader = new FileReader();
           reader.onload = () => {
             if (reader.result && callState.speakerEnabled) {
               try {
+                // Create audio context for proper playback
+                const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
                 const arrayBuffer = reader.result as ArrayBuffer;
-                const audioBlob = new Blob([arrayBuffer], { type: 'audio/pcm' });
-                const audioUrl = URL.createObjectURL(audioBlob);
-                const audio = new Audio(audioUrl);
                 
-                audio.play().then(() => {
-                  setIsRecording(true);
-                }).catch(err => {
-                  console.error('Error playing audio:', err);
-                });
-                
-                audio.addEventListener('ended', () => {
-                  URL.revokeObjectURL(audioUrl);
-                  setIsRecording(false);
-                });
+                audioContext.decodeAudioData(arrayBuffer)
+                  .then(audioBuffer => {
+                    const source = audioContext.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(audioContext.destination);
+                    
+                    source.onended = () => {
+                      setIsRecording(false);
+                      audioContext.close();
+                    };
+                    
+                    setIsRecording(true);
+                    source.start(0);
+                    
+                    console.log('Audio played successfully');
+                  })
+                  .catch(decodeError => {
+                    console.error('Error decoding audio data:', decodeError);
+                    // Fallback: try simple audio playback
+                    setIsRecording(false);
+                  });
+                  
               } catch (error) {
                 console.error('Error processing binary audio:', error);
               }
@@ -199,8 +216,33 @@ const AudioCallApp: React.FC = () => {
             console.log('Setup completed');
             setCallState(prev => ({ ...prev, status: 'connected' }));
             // Start audio streaming after setup is complete
-            if (mediaStreamRef.current) {
-              setupAudioStreaming();
+            if (mediaStreamRef.current && wsRef.current) {
+              // Setup audio streaming directly here to avoid circular dependency
+              setTimeout(() => {
+                if (mediaStreamRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+                  console.log('Setting up audio streaming...');
+                  
+                  try {
+                    const mediaRecorder = new MediaRecorder(mediaStreamRef.current, {
+                      mimeType: 'audio/webm;codecs=opus'
+                    });
+                    
+                    mediaRecorder.ondataavailable = (event) => {
+                      if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN && !callState.isMuted) {
+                        console.log('Sending audio data, size:', event.data.size);
+                        sendAudioData(event.data);
+                      }
+                    };
+                    
+                    mediaRecorder.start(250);
+                    mediaRecorderRef.current = mediaRecorder;
+                    
+                    console.log('Audio streaming setup completed');
+                  } catch (error) {
+                    console.error('Error setting up audio streaming:', error);
+                  }
+                }
+              }, 500);
             }
           }
           
@@ -230,6 +272,48 @@ const AudioCallApp: React.FC = () => {
     }
   }, [apiKey, callState.speakerEnabled, toast]);
 
+  const endCall = useCallback(() => {
+    // Close WebSocket
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    
+    // Stop media recorder if it exists
+    if (mediaRecorderRef.current) {
+      const recorder = mediaRecorderRef.current;
+      if (recorder.state !== 'inactive') {
+        recorder.stop();
+      }
+      mediaRecorderRef.current = null;
+    }
+    
+    // Stop media stream
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      mediaStreamRef.current = null;
+    }
+    
+    // Update state
+    setCallState({
+      isActive: false,
+      startTime: null,
+      duration: '00:00',
+      isMuted: false,
+      speakerEnabled: true,
+      status: 'idle'
+    });
+    
+    setShowCallModal(false);
+    setConversation([]);
+    setIsRecording(false);
+    
+    toast({
+      title: "Chamada Encerrada",
+      description: "A chamada foi finalizada",
+    });
+  }, [toast]);
+
   const playAudioResponse = useCallback((base64Data: string, mimeType: string) => {
     try {
       const audioData = atob(base64Data);
@@ -239,18 +323,45 @@ const AudioCallApp: React.FC = () => {
         audioArray[i] = audioData.charCodeAt(i);
       }
       
-      const audioBlob = new Blob([audioArray], { type: mimeType });
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
+      // Try multiple audio formats for compatibility
+      const supportedTypes = ['audio/mp3', 'audio/wav', 'audio/ogg', mimeType];
+      let audioUrl = null;
       
-      audio.play().then(() => {
-        setIsRecording(true);
-      });
+      for (const type of supportedTypes) {
+        try {
+          const audioBlob = new Blob([audioArray], { type });
+          audioUrl = URL.createObjectURL(audioBlob);
+          const audio = new Audio(audioUrl);
+          
+          const playPromise = audio.play();
+          
+          if (playPromise) {
+            playPromise.then(() => {
+              setIsRecording(true);
+              console.log('Audio playing with type:', type);
+            }).catch(err => {
+              console.log('Failed with type:', type, err);
+              URL.revokeObjectURL(audioUrl);
+              audioUrl = null;
+            });
+          }
+          
+          if (audioUrl) {
+            audio.addEventListener('ended', () => {
+              URL.revokeObjectURL(audioUrl!);
+              setIsRecording(false);
+            });
+            break;
+          }
+        } catch (typeError) {
+          console.log('Type not supported:', type);
+          continue;
+        }
+      }
       
-      audio.addEventListener('ended', () => {
-        URL.revokeObjectURL(audioUrl);
-        setIsRecording(false);
-      });
+      if (!audioUrl) {
+        console.error('No supported audio format found');
+      }
       
     } catch (error) {
       console.error('Error playing audio response:', error);
@@ -332,6 +443,18 @@ const AudioCallApp: React.FC = () => {
 
   const startCall = useCallback(async () => {
     try {
+      // Check microphone permission first
+      const permission = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+      
+      if (permission.state === 'denied') {
+        toast({
+          title: "Permissão Negada",
+          description: "É necessário permitir acesso ao microfone. Verifique as configurações do navegador.",
+          variant: "destructive"
+        });
+        return;
+      }
+
       setShowCallModal(true);
       setCallState(prev => ({ 
         ...prev, 
@@ -345,17 +468,42 @@ const AudioCallApp: React.FC = () => {
         timestamp: Date.now()
       }]);
 
-      // Get user media
-      mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
+      // Get user media with permission request
+      try {
+        mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 16000
+          }
+        });
+        
+        console.log('Microphone access granted');
+        
+        // Connect to Live API after getting media
+        await connectToLiveAPI();
+        
+      } catch (mediaError) {
+        console.error('Microphone access error:', mediaError);
+        
+        if (mediaError.name === 'NotAllowedError') {
+          toast({
+            title: "Acesso Negado",
+            description: "É necessário permitir o acesso ao microfone para fazer chamadas de voz.",
+            variant: "destructive"
+          });
+        } else {
+          toast({
+            title: "Erro de Microfone",
+            description: "Não foi possível acessar o microfone. Verifique se não está sendo usado por outro aplicativo.",
+            variant: "destructive"
+          });
         }
-      });
-
-      // Connect to Live API
-      await connectToLiveAPI();
+        
+        endCall();
+        return;
+      }
 
     } catch (error) {
       console.error('Error starting call:', error);
@@ -366,49 +514,8 @@ const AudioCallApp: React.FC = () => {
       });
       endCall();
     }
-  }, [connectToLiveAPI, toast]);
+  }, [connectToLiveAPI, toast, endCall]);
 
-  const endCall = useCallback(() => {
-    // Close WebSocket
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    
-    // Stop media recorder if it exists
-    if (mediaRecorderRef.current) {
-      const recorder = mediaRecorderRef.current;
-      if (recorder.state !== 'inactive') {
-        recorder.stop();
-      }
-      mediaRecorderRef.current = null;
-    }
-    
-    // Stop media stream
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(track => track.stop());
-      mediaStreamRef.current = null;
-    }
-    
-    // Update state
-    setCallState({
-      isActive: false,
-      startTime: null,
-      duration: '00:00',
-      isMuted: false,
-      speakerEnabled: true,
-      status: 'idle'
-    });
-    
-    setShowCallModal(false);
-    setConversation([]);
-    setIsRecording(false);
-    
-    toast({
-      title: "Chamada Encerrada",
-      description: "A chamada foi finalizada",
-    });
-  }, [toast]);
 
   const toggleMute = useCallback(() => {
     setCallState(prev => ({ ...prev, isMuted: !prev.isMuted }));
@@ -531,6 +638,7 @@ const AudioCallApp: React.FC = () => {
         <DialogContent className="max-w-md h-[90vh] p-0 bg-white rounded-3xl overflow-hidden">
           <VisuallyHidden>
             <DialogTitle>Chamada de Voz com IA</DialogTitle>
+            <DialogDescription>Interface de chamada em tempo real com assistente de IA</DialogDescription>
           </VisuallyHidden>
           {/* Call Header */}
           <div className="bg-gradient-call text-white p-6 pb-4">
