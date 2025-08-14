@@ -2,7 +2,8 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card } from '@/components/ui/card';
-import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
+import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
 import { Mic, MicOff, Volume2, VolumeX, Phone, PhoneOff, Settings } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
@@ -38,6 +39,7 @@ const AudioCallApp: React.FC = () => {
 
   const wsRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const { toast } = useToast();
 
@@ -132,8 +134,44 @@ const AudioCallApp: React.FC = () => {
       };
       
       wsRef.current.onmessage = (event) => {
+        console.log('Received WebSocket message:', event);
+        
+        // Check if the message is binary (Blob) or text
+        if (event.data instanceof Blob) {
+          console.log('Received binary audio data');
+          // Handle binary audio data
+          const reader = new FileReader();
+          reader.onload = () => {
+            if (reader.result && callState.speakerEnabled) {
+              try {
+                const arrayBuffer = reader.result as ArrayBuffer;
+                const audioBlob = new Blob([arrayBuffer], { type: 'audio/pcm' });
+                const audioUrl = URL.createObjectURL(audioBlob);
+                const audio = new Audio(audioUrl);
+                
+                audio.play().then(() => {
+                  setIsRecording(true);
+                }).catch(err => {
+                  console.error('Error playing audio:', err);
+                });
+                
+                audio.addEventListener('ended', () => {
+                  URL.revokeObjectURL(audioUrl);
+                  setIsRecording(false);
+                });
+              } catch (error) {
+                console.error('Error processing binary audio:', error);
+              }
+            }
+          };
+          reader.readAsArrayBuffer(event.data);
+          return;
+        }
+
+        // Handle text/JSON messages
         try {
           const data = JSON.parse(event.data);
+          console.log('Parsed JSON data:', data);
           
           if (data.serverContent?.modelTurn?.parts) {
             const parts = data.serverContent.modelTurn.parts;
@@ -141,6 +179,7 @@ const AudioCallApp: React.FC = () => {
             // Handle text response
             const textPart = parts.find((part: any) => part.text);
             if (textPart) {
+              console.log('Adding AI message:', textPart.text);
               setConversation(prev => [...prev, {
                 speaker: 'AI',
                 message: textPart.text,
@@ -151,16 +190,23 @@ const AudioCallApp: React.FC = () => {
             // Handle audio response
             const audioPart = parts.find((part: any) => part.inlineData?.mimeType?.startsWith('audio/'));
             if (audioPart && callState.speakerEnabled) {
+              console.log('Playing audio response');
               playAudioResponse(audioPart.inlineData.data, audioPart.inlineData.mimeType);
             }
           }
           
           if (data.setupComplete) {
+            console.log('Setup completed');
             setCallState(prev => ({ ...prev, status: 'connected' }));
+            // Start audio streaming after setup is complete
+            if (mediaStreamRef.current) {
+              setupAudioStreaming();
+            }
           }
           
         } catch (error) {
           console.error('Error handling WebSocket message:', error);
+          console.log('Raw event data:', event.data);
         }
       };
       
@@ -211,6 +257,79 @@ const AudioCallApp: React.FC = () => {
     }
   }, []);
 
+  const setupAudioStreaming = useCallback(() => {
+    if (!mediaStreamRef.current || !wsRef.current) {
+      console.log('Cannot setup audio streaming - missing stream or websocket');
+      return;
+    }
+
+    console.log('Setting up audio streaming...');
+    
+    try {
+      const mediaRecorder = new MediaRecorder(mediaStreamRef.current, {
+        mimeType: 'audio/webm;codecs=opus'
+      });
+      
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN && !callState.isMuted) {
+          console.log('Sending audio data, size:', event.data.size);
+          sendAudioData(event.data);
+        }
+      };
+      
+      mediaRecorder.onstop = () => {
+        console.log('MediaRecorder stopped');
+      };
+      
+      mediaRecorder.onerror = (event) => {
+        console.error('MediaRecorder error:', event);
+      };
+      
+      // Start recording in chunks
+      mediaRecorder.start(250); // Send data every 250ms
+      
+      // Store reference for cleanup
+      mediaRecorderRef.current = mediaRecorder;
+      
+      console.log('Audio streaming setup completed');
+      
+    } catch (error) {
+      console.error('Error setting up audio streaming:', error);
+      toast({
+        title: "Erro de Audio",
+        description: "Falha ao configurar streaming de audio",
+        variant: "destructive"
+      });
+    }
+  }, [callState.isMuted, toast]);
+
+  const sendAudioData = useCallback(async (audioBlob: Blob) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.log('WebSocket not ready for sending audio');
+      return;
+    }
+    
+    try {
+      const arrayBuffer = await audioBlob.arrayBuffer();
+      const base64Data = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+      
+      const audioMessage = {
+        realtimeInput: {
+          mediaChunks: [{
+            mimeType: 'audio/webm;codecs=opus',
+            data: base64Data
+          }]
+        }
+      };
+      
+      wsRef.current.send(JSON.stringify(audioMessage));
+      console.log('Audio data sent successfully');
+      
+    } catch (error) {
+      console.error('Error sending audio data:', error);
+    }
+  }, []);
+
   const startCall = useCallback(async () => {
     try {
       setShowCallModal(true);
@@ -254,6 +373,15 @@ const AudioCallApp: React.FC = () => {
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
+    }
+    
+    // Stop media recorder if it exists
+    if (mediaRecorderRef.current) {
+      const recorder = mediaRecorderRef.current;
+      if (recorder.state !== 'inactive') {
+        recorder.stop();
+      }
+      mediaRecorderRef.current = null;
     }
     
     // Stop media stream
@@ -401,6 +529,9 @@ const AudioCallApp: React.FC = () => {
       {/* Call Modal */}
       <Dialog open={showCallModal} onOpenChange={() => {}}>
         <DialogContent className="max-w-md h-[90vh] p-0 bg-white rounded-3xl overflow-hidden">
+          <VisuallyHidden>
+            <DialogTitle>Chamada de Voz com IA</DialogTitle>
+          </VisuallyHidden>
           {/* Call Header */}
           <div className="bg-gradient-call text-white p-6 pb-4">
             <div className="flex items-center justify-between">
