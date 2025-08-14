@@ -26,11 +26,20 @@ export default {
 				foreground: 'hsl(var(--foreground))',
 				primary: {
 					DEFAULT: 'hsl(var(--primary))',
-					foreground: 'hsl(var(--primary-foreground))'
+					foreground: 'hsl(var(--primary-foreground))',
+					glow: 'hsl(var(--primary-glow))'
 				},
 				secondary: {
 					DEFAULT: 'hsl(var(--secondary))',
 					foreground: 'hsl(var(--secondary-foreground))'
+				},
+				success: {
+					DEFAULT: 'hsl(var(--success))',
+					foreground: 'hsl(var(--success-foreground))'
+				},
+				warning: {
+					DEFAULT: 'hsl(var(--warning))',
+					foreground: 'hsl(var(--warning-foreground))'
 				},
 				destructive: {
 					DEFAULT: 'hsl(var(--destructive))',
@@ -61,7 +70,28 @@ export default {
 					'accent-foreground': 'hsl(var(--sidebar-accent-foreground))',
 					border: 'hsl(var(--sidebar-border))',
 					ring: 'hsl(var(--sidebar-ring))'
-				}
+				},
+				'call-bg': 'hsl(var(--call-bg))',
+				'call-modal-bg': 'hsl(var(--call-modal-bg))',
+				'call-header-bg': 'hsl(var(--call-header-bg))',
+				'visualizer-primary': 'hsl(var(--visualizer-primary))',
+				'visualizer-secondary': 'hsl(var(--visualizer-secondary))'
+			},
+			backgroundImage: {
+				'gradient-primary': 'var(--gradient-primary)',
+				'gradient-call': 'var(--gradient-call)',
+				'gradient-success': 'var(--gradient-success)',
+				'gradient-destructive': 'var(--gradient-destructive)',
+				'gradient-bg': 'var(--gradient-bg)'
+			},
+			boxShadow: {
+				'call': 'var(--shadow-call)',
+				'modal': 'var(--shadow-modal)',
+				'glow': 'var(--shadow-glow)'
+			},
+			transitionTimingFunction: {
+				'smooth': 'var(--transition-smooth)',
+				'bounce': 'var(--transition-bounce)'
 			},
 			borderRadius: {
 				lg: 'var(--radius)',
